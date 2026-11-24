@@ -509,7 +509,7 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     __weak TerminalView *view = self;
     UIAction *copy = [UIAction actionWithTitle:@"Copy" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(UIAction *action) { [view copy:nil]; }];
     UIAction *selectAll = [UIAction actionWithTitle:@"Select All" image:nil identifier:nil handler:^(UIAction *action) { [view selectAll:nil]; }];
-    
+
     UIAction *copyAll = [UIAction
         actionWithTitle:@"Copy All"
         image:[UIImage systemImageNamed:@"doc.on.doc"]
@@ -676,6 +676,15 @@ static const char *metaKeys = "abcdefghijklmnopqrstuvwxyz0123456789-=[]\\;',./";
                                                 modifierFlags:UIKeyModifierCommand|UIKeyModifierShift
                                                        action:@selector(clearScrollback:)
                                          discoverabilityTitle:@"Clear Scrollback"]];
+
+    [_keyCommands addObject:
+        [UIKeyCommand
+            keyCommandWithInput:@"c"
+            modifierFlags:UIKeyModifierCommand |
+                          UIKeyModifierShift
+            action:@selector(copyAllTerminalOutput:)
+            discoverabilityTitle:@"Copy All Terminal Output"]];
+
     return _keyCommands;
 }
 
