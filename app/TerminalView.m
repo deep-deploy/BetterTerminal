@@ -461,6 +461,23 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     return [super canPerformAction:action withSender:sender];
 }
 
+
+- (void)copyAllTerminalOutput:(id)sender {
+    if (!self.terminal.loaded)
+        return;
+
+    [self.terminal.webView
+        evaluateJavaScript:
+        @"exports.selectAll(); exports.copy();"
+        completionHandler:^(id result, NSError *error) {
+            if (!error &&
+                [result isKindOfClass:NSString.class] &&
+                [result length] > 0) {
+                UIPasteboard.generalPasteboard.string = result;
+            }
+        }];
+}
+
 - (void)selectAll:(id)sender {
     [self.terminal.webView evaluateJavaScript:@"exports.selectAll?.()" completionHandler:nil];
 }
@@ -492,7 +509,26 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     __weak TerminalView *view = self;
     UIAction *copy = [UIAction actionWithTitle:@"Copy" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(UIAction *action) { [view copy:nil]; }];
     UIAction *selectAll = [UIAction actionWithTitle:@"Select All" image:nil identifier:nil handler:^(UIAction *action) { [view selectAll:nil]; }];
-    return [UIMenu menuWithChildren:@[copy, selectAll]];
+    
+    UIAction *copyAll = [UIAction
+        actionWithTitle:@"Copy All"
+        image:[UIImage systemImageNamed:@"doc.on.doc"]
+        identifier:nil
+        handler:^(UIAction *action) {
+            [view copyAllTerminalOutput:nil];
+        }];
+
+    UIAction *paste = [UIAction
+        actionWithTitle:@"Paste"
+        image:[UIImage systemImageNamed:@"clipboard"]
+        identifier:nil
+        handler:^(UIAction *action) {
+            [view paste:nil];
+        }];
+
+    return [UIMenu menuWithChildren:
+        @[copy, copyAll, selectAll, paste]];
+
 }
 
 - (void)clearScrollback:(UIKeyCommand *)command {
