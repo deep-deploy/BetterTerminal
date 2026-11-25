@@ -263,6 +263,29 @@ char *(*get_documents_directory)(void);
     static NSArray<Theme *> *defaultThemes;
     if (!defaultThemes) {
         defaultThemes = @[
+            [self themeWithName:@"BetterTerminal"
+                  foreground:@"#d7dde2"
+                  background:@"#0a0e0d"
+                      cursor:@"#eafcff"
+                  appearance:ThemeAppearance.alwaysDark
+                     palette:@[
+                            @"#0a0e0d",
+                            @"#ff6b6b",
+                            @"#00d98e",
+                            @"#ffd166",
+                            @"#60a5fa",
+                            @"#c4a0ff",
+                            @"#00d9d9",
+                            @"#d7dde2",
+                            @"#64748b",
+                            @"#ff9292",
+                            @"#00e69a",
+                            @"#ffe08a",
+                            @"#93c5fd",
+                            @"#e0c4ff",
+                            @"#68edff",
+                            @"#ffffff",
+                      ]],
             [self themeWithName:@"xterm"
                   foreground:@"#e5e5e5"
                   background:@"#000000"

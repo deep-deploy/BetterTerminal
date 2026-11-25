@@ -41,4 +41,6 @@ case "$rootfs_arch:$description" in
         exit 1
         ;;
 esac
+# The original archive was verified above; apply local branding afterwards.
+python3 "$(dirname "$0")/betterterminal-rootfs.py" "$archive"
 mv -f "$archive" "$output"

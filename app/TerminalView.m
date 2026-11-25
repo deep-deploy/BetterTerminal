@@ -39,6 +39,8 @@ struct rowcol {
 @property ScrollbarView *scrollbarView;
 @property (nonatomic) BOOL terminalFocused;
 @property (nonatomic) BOOL updatingTerminalScroll;
+@property (nonatomic) UIPanGestureRecognizer *btApplicationPan;
+@property (nonatomic) CGFloat btApplicationPanRemainder;
 @property UIEditMenuInteraction *terminalEditMenu API_AVAILABLE(ios(16.0));
 
 @property (nullable) NSString *markedText;
@@ -65,13 +67,26 @@ struct rowcol {
     ScrollbarView *scrollbarView = self.scrollbarView = [[ScrollbarView alloc] initWithFrame:self.bounds];
     scrollbarView.delegate = self;
     scrollbarView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    scrollbarView.bounces = NO;
+    scrollbarView.bounces = YES;
+    scrollbarView.alwaysBounceVertical = NO;
+    scrollbarView.showsVerticalScrollIndicator = NO;
+    scrollbarView.showsHorizontalScrollIndicator = NO;
+    scrollbarView.delaysContentTouches = NO;
+    scrollbarView.canCancelContentTouches = YES;
+    scrollbarView.directionalLockEnabled = YES;
     scrollbarView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.clipsToBounds = YES;
     [self addSubview:scrollbarView];
+    self.btApplicationPan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(btScrollApplication:)];
+    self.btApplicationPan.minimumNumberOfTouches = 1;
+    self.btApplicationPan.maximumNumberOfTouches = 1;
+    self.btApplicationPan.enabled = NO;
+    [self addGestureRecognizer:self.btApplicationPan];
+    [scrollbarView.panGestureRecognizer requireGestureRecognizerToFail:self.btApplicationPan];
 #if USE_XTERM_RENDERER
     UILongPressGestureRecognizer *selectionGesture = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(selectTerminalText:)];
     [self addGestureRecognizer:selectionGesture];
+    [self.btApplicationPan requireGestureRecognizerToFail:selectionGesture];
     if (@available(iOS 16.0, *)) {
         self.terminalEditMenu = [[UIEditMenuInteraction alloc] initWithDelegate:self];
         [self addInteraction:self.terminalEditMenu];
@@ -120,7 +135,7 @@ struct rowcol {
     }
 }
 
-static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight", @"newScrollTop", @"openLink", @"selectionChanged"};
+static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight", @"newScrollTop", @"openLink", @"selectionChanged", @"btApplicationScroll"};
 
 - (void)setTerminal:(Terminal *)terminal {
     if (_terminal) {
@@ -128,6 +143,8 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         [self uninstallTerminalView];
     }
 
+    self.btApplicationPan.enabled = NO;
+    self.btApplicationPanRemainder = 0;
     _terminal = terminal;
     self.selectedText = nil;
     if (_terminal == nil)
@@ -149,7 +166,7 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         _terminal.enableVoiceOverAnnounce = YES;
     webView.scrollView.scrollEnabled = NO;
     webView.scrollView.delaysContentTouches = NO;
-    webView.scrollView.canCancelContentTouches = NO;
+    webView.scrollView.canCancelContentTouches = YES;
     webView.scrollView.panGestureRecognizer.enabled = NO;
     id <WKScriptMessageHandler> handler = [[WeakScriptMessageHandler alloc] initWithHandler:self];
     for (int i = 0; i < sizeof(HANDLERS)/sizeof(HANDLERS[0]); i++) {
@@ -327,12 +344,40 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         self.updatingTerminalScroll = YES;
         [self.scrollbarView setContentOffset:CGPointMake(0, newOffset) animated:NO];
         self.updatingTerminalScroll = NO;
+    } else if ([message.name isEqualToString:@"btApplicationScroll"]) {
+        if ([message.body isKindOfClass:NSNumber.class]) {
+            self.btApplicationPan.enabled = [message.body boolValue];
+        }
     } else if ([message.name isEqualToString:@"openLink"]) {
         if ([message.body isKindOfClass:NSString.class])
             [UIApplication openURL:message.body];
     } else if ([message.name isEqualToString:@"selectionChanged"]) {
         if ([message.body isKindOfClass:NSString.class])
             self.selectedText = message.body;
+    }
+}
+
+// Convert vertical finger drags to wheel ticks only for mouse-aware full-screen apps.
+- (void)btScrollApplication:(UIPanGestureRecognizer *)gesture {
+    if (!self.terminal.loaded)
+        return;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        self.btApplicationPanRemainder = 0;
+    }
+    if (gesture.state == UIGestureRecognizerStateBegan || gesture.state == UIGestureRecognizerStateChanged) {
+        CGPoint delta = [gesture translationInView:self];
+        [gesture setTranslation:CGPointZero inView:self];
+        self.btApplicationPanRemainder += delta.y;
+        NSInteger ticks = (NSInteger)(self.btApplicationPanRemainder / 24.0);
+        if (ticks == 0)
+            return;
+        ticks = MAX(-8, MIN(8, ticks));
+        self.btApplicationPanRemainder -= ticks * 24.0;
+        CGPoint point = [gesture locationInView:self.terminal.webView];
+        NSString *script = [NSString stringWithFormat:@"exports.btApplicationWheel(%ld,%f,%f)", (long)ticks, point.x, point.y];
+        [self.terminal.webView evaluateJavaScript:script completionHandler:nil];
+    } else {
+        self.btApplicationPanRemainder = 0;
     }
 }
 
