@@ -26,6 +26,147 @@ static char BTSessionPIDKey;
 - (void)copyAllTerminalOutput:(id)sender;
 @end
 
+
+// BetterTerminal local preview v0.2
+#import <WebKit/WebKit.h>
+
+@interface BTLocalPreviewController : UIViewController <WKNavigationDelegate, UITextFieldDelegate>
+@property (nonatomic, strong) WKWebView *preview;
+@property (nonatomic, strong) UITextField *address;
+@property (nonatomic, strong) UILabel *statusLabel;
+@end
+
+@implementation BTLocalPreviewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Local Preview";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(btDone:)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(btReload:)];
+
+    UITextField *field = [UITextField new];
+    field.borderStyle = UITextBorderStyleRoundedRect;
+    field.keyboardType = UIKeyboardTypeURL;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.spellCheckingType = UITextSpellCheckingTypeNo;
+    field.returnKeyType = UIReturnKeyGo;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.text = @"http://127.0.0.1:8080";
+    field.accessibilityLabel = @"Local website address";
+    field.delegate = self;
+    self.address = field;
+    [field setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIButton *go = [UIButton buttonWithType:UIButtonTypeSystem];
+    [go setTitle:@"Go" forState:UIControlStateNormal];
+    [go addTarget:self action:@selector(btGo:) forControlEvents:UIControlEventTouchUpInside];
+    [go.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[field, go]];
+    row.spacing = 8;
+    row.alignment = UIStackViewAlignmentFill;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:row];
+
+    UILabel *status = [UILabel new];
+    status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    status.textColor = UIColor.secondaryLabelColor;
+    status.numberOfLines = 2;
+    status.text = @"Localhost only";
+    status.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:status];
+    self.statusLabel = status;
+
+    // Isolated from the terminal WKWebView and its privileged message handlers.
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    config.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    WKWebView *web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+    web.navigationDelegate = self;
+    web.allowsBackForwardNavigationGestures = YES;
+    web.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:web];
+    self.preview = web;
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [row.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [row.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:44],
+        [status.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:5],
+        [status.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [status.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [web.topAnchor constraintEqualToAnchor:status.bottomAnchor constant:6],
+        [web.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [web.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor]
+    ]];
+    if (@available(iOS 15.0, *)) {
+        [web.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor].active = YES;
+    } else {
+        [web.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor].active = YES;
+    }
+    [self btGo:nil];
+}
+
+- (BOOL)btAllowsURL:(NSURL *)url {
+    if (!url) return NO;
+    NSString *scheme = url.scheme.lowercaseString;
+    NSString *host = url.host.lowercaseString;
+    BOOL isHTTP = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+    BOOL isLoopback = [host isEqualToString:@"localhost"] || [host isEqualToString:@"127.0.0.1"] ||
+        [host isEqualToString:@"::1"] || [host isEqualToString:@"[::1]"];
+    return isHTTP && isLoopback && !url.user && !url.password &&
+        (!url.port || (url.port.integerValue > 0 && url.port.integerValue <= 65535));
+}
+
+- (void)btGo:(id)sender {
+    NSString *value = [self.address.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (![value containsString:@"://"]) value = [@"http://" stringByAppendingString:value];
+    NSURL *url = [NSURL URLWithString:value];
+    if (![self btAllowsURL:url]) {
+        self.statusLabel.text = @"Enter a localhost or loopback HTTP(S) address.";
+        return;
+    }
+    [self.address resignFirstResponder];
+    self.address.text = url.absoluteString;
+    self.statusLabel.text = @"Loading local server…";
+    [self.preview loadRequest:[NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:15]];
+}
+- (void)btReload:(id)sender { [self btGo:sender]; }
+- (void)btDone:(id)sender {
+    [self.preview stopLoading];
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)textField { [self btGo:textField]; return YES; }
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
+    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    if (![self btAllowsURL:action.request.URL]) {
+        self.statusLabel.text = @"Navigation blocked: local preview only.";
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    if (action.targetFrame == nil) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        [webView loadRequest:action.request];
+        return;
+    }
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    self.address.text = webView.URL.absoluteString;
+    self.statusLabel.text = @"Local preview · swipe to scroll";
+}
+- (void)btReportError:(NSError *)error {
+    if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    self.statusLabel.text = error.localizedDescription;
+}
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self btReportError:error]; }
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self btReportError:error]; }
+@end
+
 @interface TerminalViewController () <UIGestureRecognizerDelegate>
 
 @property UITapGestureRecognizer *tapRecognizer;
@@ -202,6 +343,18 @@ static char BTSessionPIDKey;
 
 #pragma mark BetterTerminal native tabs
 
+
+- (void)btOpenPreview:(id)sender {
+    if (self.presentedViewController) return;
+    [self.termView resignFirstResponder];
+    BTLocalPreviewController *preview = [BTLocalPreviewController new];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:preview];
+    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:navigation animated:YES completion:nil];
+}
+
+
+
 - (void)btEnsureTabs {
     if (self.btTabs != nil) return;
     self.btTabs = [NSMutableArray array];
@@ -274,6 +427,15 @@ static char BTSessionPIDKey;
     [strip addSubview:add];
     self.btAddButton = add;
 
+    UIButton *browser = [UIButton buttonWithType:UIButtonTypeSystem];
+    browser.translatesAutoresizingMaskIntoConstraints = NO;
+    [browser setImage:[UIImage systemImageNamed:@"globe"] forState:UIControlStateNormal];
+    browser.tintColor = accent;
+    browser.accessibilityLabel = @"Open local website preview";
+    [browser addTarget:self action:@selector(btOpenPreview:) forControlEvents:UIControlEventTouchUpInside];
+    [strip addSubview:browser];
+
+
     oldTop.active = NO;
     [NSLayoutConstraint activateConstraints:@[
         [strip.topAnchor constraintEqualToAnchor:safe.topAnchor],
@@ -286,7 +448,11 @@ static char BTSessionPIDKey;
         [add.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
         [add.widthAnchor constraintEqualToConstant:44],
         [scroll.leadingAnchor constraintEqualToAnchor:strip.leadingAnchor constant:6],
-        [scroll.trailingAnchor constraintEqualToAnchor:add.leadingAnchor constant:-4],
+        [browser.trailingAnchor constraintEqualToAnchor:add.leadingAnchor],
+        [browser.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [browser.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [browser.widthAnchor constraintEqualToConstant:44],
+        [scroll.trailingAnchor constraintEqualToAnchor:browser.leadingAnchor constant:-4],
         [scroll.topAnchor constraintEqualToAnchor:strip.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
         [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
