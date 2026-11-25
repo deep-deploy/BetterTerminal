@@ -22,6 +22,10 @@ static char BTSessionPIDKey;
 #include "kernel/calls.h"
 #include "fs/devices.h"
 
+@interface TerminalView (BetterTerminalDeveloperActions)
+- (void)copyAllTerminalOutput:(id)sender;
+@end
+
 @interface TerminalViewController () <UIGestureRecognizerDelegate>
 
 @property UITapGestureRecognizer *tapRecognizer;
@@ -55,6 +59,8 @@ static char BTSessionPIDKey;
 @property (nonatomic) UIStackView *btTabStack;
 @property (nonatomic) UIScrollView *btTabScroll;
 @property (nonatomic) UIButton *btAddButton;
+@property (nonatomic) UIScrollView *btDeveloperKeys;
+@property (nonatomic) UIStackView *btDeveloperKeyStack;
 
 @property int sessionPid;
 @property (nonatomic) Terminal *sessionTerminal;
@@ -87,6 +93,7 @@ static char BTSessionPIDKey;
 #endif
 
     [self btInstallTabs];
+    [self btInstallDeveloperKeys];
     self.terminal = self.terminal;
     [self.termView becomeFirstResponder];
 
@@ -563,6 +570,7 @@ static char BTSessionPIDKey;
         for (UIControl *control in self.barControls) {
             control.tintColor = tintColor;
         }
+        [self btStyleDeveloperKeys];
     }];
     UIView *oldBarView = self.termView.inputAccessoryView;
     if (UserPreferences.shared.hideExtraKeysWithExternalKeyboard && self.hasExternalKeyboard) {
@@ -661,6 +669,119 @@ static char BTSessionPIDKey;
     }
 }
 
+#pragma mark BetterTerminal developer keys
+
+- (void)btInstallDeveloperKeys {
+    if (self.btDeveloperKeys || !self.barView || !self.bar) return;
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.directionalLockEnabled = YES;
+    scroll.alwaysBounceVertical = NO;
+    scroll.delaysContentTouches = YES;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [self.barView addSubview:scroll];
+    self.btDeveloperKeys = scroll;
+
+    UIStackView *keys = [UIStackView new];
+    keys.translatesAutoresizingMaskIntoConstraints = NO;
+    keys.axis = UILayoutConstraintAxisHorizontal;
+    keys.spacing = 6;
+    keys.alignment = UIStackViewAlignmentFill;
+    [scroll addSubview:keys];
+    self.btDeveloperKeyStack = keys;
+
+    NSArray<NSString *> *titles = @[@"←", @"↑", @"↓", @"→", @"Home", @"End", @"PgUp", @"PgDn",
+                                   @"Ctrl+C", @"Ctrl+L", @"Ctrl+A", @"Ctrl+E", @"Ctrl+R", @"Ctrl+D",
+                                   @"Copy All", @"F1", @"F2", @"F3", @"F4", @"F5", @"F6", @"F7", @"F8", @"F9", @"F10", @"F11", @"F12"];
+    NSArray<NSString *> *labels = @[@"Left arrow", @"Up arrow", @"Down arrow", @"Right arrow",
+                                   @"Home", @"End", @"Page up", @"Page down",
+                                   @"Interrupt, Control C", @"Clear screen, Control L", @"Beginning of line, Control A",
+                                   @"End of line, Control E", @"Reverse history search, Control R", @"End of input, Control D",
+                                   @"Copy all terminal output", @"F1", @"F2", @"F3", @"F4", @"F5", @"F6", @"F7", @"F8", @"F9", @"F10", @"F11", @"F12"];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.tag = (NSInteger)i;
+        button.translatesAutoresizingMaskIntoConstraints = NO;
+        button.titleLabel.font = [UIFont fontWithName:@"Menlo" size:12] ?: [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        button.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+        button.layer.cornerRadius = 8;
+        [button setTitle:titles[i] forState:UIControlStateNormal];
+        button.accessibilityLabel = labels[i];
+        [button.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        [button addTarget:self action:@selector(btDeveloperKeyPressed:) forControlEvents:UIControlEventTouchUpInside];
+        [keys addArrangedSubview:button];
+    }
+
+    UILayoutGuide *safe = self.barView.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:6],
+        [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-6],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.bar.topAnchor constant:-6],
+        [scroll.heightAnchor constraintEqualToConstant:44],
+        [keys.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [keys.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [keys.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [keys.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [keys.heightAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.heightAnchor]
+    ]];
+    self.barTop.constant = self.barBottom.constant + 50;
+    [self btStyleDeveloperKeys];
+    [self.barView invalidateIntrinsicContentSize];
+    [self.barView setNeedsLayout];
+}
+
+- (void)btStyleDeveloperKeys {
+    UIColor *foreground = [[UIColor alloc] ish_initWithHexString:UserPreferences.shared.palette.foregroundColor];
+    UIColor *background = [[UIColor alloc] ish_initWithHexString:UserPreferences.shared.palette.backgroundColor];
+    foreground = foreground ?: UIColor.whiteColor;
+    background = background ?: UIColor.blackColor;
+    self.btDeveloperKeys.backgroundColor = background;
+    for (UIButton *button in self.btDeveloperKeyStack.arrangedSubviews) {
+        [button setTitleColor:foreground forState:UIControlStateNormal];
+        button.tintColor = foreground;
+        button.backgroundColor = [foreground colorWithAlphaComponent:0.12];
+    }
+}
+
+- (void)btDeveloperKeyPressed:(UIButton *)sender {
+    Terminal *terminal = self.terminal;
+    if (!terminal || !terminal.loaded) return;
+    if (sender.tag == 14) {
+        [self.termView copyAllTerminalOutput:nil];
+        return;
+    }
+    // Explicit special keys must not consume or be transformed by the Ctrl latch.
+    self.controlKey.selected = NO;
+    NSString *key = nil;
+    switch (sender.tag) {
+        case 0: key = [terminal arrow:'D']; break;
+        case 1: key = [terminal arrow:'A']; break;
+        case 2: key = [terminal arrow:'B']; break;
+        case 3: key = [terminal arrow:'C']; break;
+        case 4: key = [terminal arrow:'H']; break;
+        case 5: key = [terminal arrow:'F']; break;
+        case 6: key = @"\x1b[5~"; break;
+        case 7: key = @"\x1b[6~"; break;
+        case 8: key = @"\x03"; break;
+        case 9: key = @"\x0c"; break;
+        case 10: key = @"\x01"; break;
+        case 11: key = @"\x05"; break;
+        case 12: key = @"\x12"; break;
+        case 13: key = @"\x04"; break;
+        default: {
+            NSArray<NSString *> *functionKeys = @[@"\x1bOP", @"\x1bOQ", @"\x1bOR", @"\x1bOS",
+                @"\x1b[15~", @"\x1b[17~", @"\x1b[18~", @"\x1b[19~", @"\x1b[20~", @"\x1b[21~", @"\x1b[23~", @"\x1b[24~"];
+            NSInteger index = sender.tag - 15;
+            if (index >= 0 && index < (NSInteger)functionKeys.count) key = functionKeys[(NSUInteger)index];
+            break;
+        }
+    }
+    if (key) [terminal sendInput:[key dataUsingEncoding:NSUTF8StringEncoding]];
+}
+
 #pragma mark Bar
 
 - (IBAction)showAbout:(id)sender {
@@ -699,7 +820,8 @@ static char BTSessionPIDKey;
 
 - (void)setBarHorizontalPadding:(CGFloat)horizontal verticalPadding:(CGFloat)vertical buttonWidth:(CGFloat)buttonWidth {
     self.barLeading.constant = self.barTrailing.constant = horizontal;
-    self.barTop.constant = self.barBottom.constant = vertical;
+    self.barBottom.constant = vertical;
+    self.barTop.constant = vertical + (self.btDeveloperKeys ? 50 : 0);
     self.barButtonWidth.constant = buttonWidth;
 }
 
