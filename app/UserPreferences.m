@@ -171,7 +171,7 @@ bool (*remove_user_default)(const char *name);
             kPreferenceCursorStyleKey: @(CursorStyleBlock),
             kPreferenceHideStatusBarKey: @(NO),
             kPreferenceColorSchemeKey: @(ColorSchemeMatchSystem),
-            kPreferenceThemeKey: @"xterm",
+            kPreferenceThemeKey: @"BetterTerminal",
             kHostnameOverrideKey: UIDevice.currentDevice.name,
         }];
         [_defaults registerDefaults:@{
@@ -229,6 +229,12 @@ bool (*remove_user_default)(const char *name);
         };
 #undef property
         
+        // BetterTerminal: migrate the old default once, without resetting custom themes.
+        if (![_defaults boolForKey:@"BetterTerminalThemeMigrationV1"]) {
+            if ([[_defaults stringForKey:kPreferenceThemeKey] isEqualToString:@"xterm"])
+                [_defaults setObject:@"BetterTerminal" forKey:kPreferenceThemeKey];
+            [_defaults setBool:YES forKey:@"BetterTerminalThemeMigrationV1"];
+        }
         [self updateTheme];
         
         [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateTheme:) name:ThemesUpdatedNotification object:nil];

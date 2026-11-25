@@ -1,0 +1,81 @@
+name: BetterTerminal iOS Build
+
+on:
+  push:
+    branches:
+      - betterterminal/development
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ARM64 iOS App
+    runs-on: xcode-27
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check build environment
+        run: |
+          sw_vers
+          xcodebuild -version
+          python3 --version
+
+      - name: Install dependencies
+        run: |
+          command -v meson || brew install meson
+          command -v ninja || brew install ninja
+          meson --version
+          ninja --version
+
+      - name: List Xcode schemes
+        run: |
+          xcodebuild -list -project iSH.xcodeproj
+
+      - name: Compile BetterTerminal
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iSH.xcodeproj \
+            -scheme iSH-ARM64 \
+            -configuration Debug-ApplePleaseFixFB19282108 \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee build.log
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterTerminal-Build-Logs
+          path: build.log
+          if-no-files-found: warn
+
+      - name: Package unsigned application
+        run: |
+          APP=$(find build/Build/Products \
+            -type d -name LinuxKit.app \
+            -print -quit)
+
+          test -n "$APP"
+          mkdir -p output/Payload
+          ditto "$APP" output/Payload/LinuxKit.app
+
+          cd output
+          zip -qry BetterTerminal-Unsigned.ipa Payload
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: BetterTerminal-Unsigned
+          path: output/BetterTerminal-Unsigned.ipa
+          retention-days: 7

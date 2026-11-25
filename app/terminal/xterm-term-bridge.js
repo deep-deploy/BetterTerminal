@@ -103,12 +103,7 @@
         rows: 24,
         fontSize: styleState.fontSize,
         fontFamily: styleState.fontFamily,
-        theme: {
-            foreground: styleState.foregroundColor,
-            background: styleState.backgroundColor,
-            cursor: styleState.cursorColor || styleState.foregroundColor,
-            cursorAccent: styleState.backgroundColor,
-        },
+        theme: themeForXterm(styleState),
         cursorBlink: styleState.blinkCursor,
         cursorStyle: cursorStyleForXterm(styleState.cursorShape),
         allowTransparency: true,
@@ -153,8 +148,8 @@
             return;
         resizeFrame = requestAnimationFrame(() => {
             resizeFrame = null;
+            // onResize already notifies the native PTY when dimensions change.
             fitAddon.fit();
-            native.resize();
             scheduleScrollSync();
         });
     }
@@ -177,6 +172,20 @@
             term.write(bytes, scheduleScrollSync);
             if (bytes.includes(0x1b))
                 syncApplicationCursor();
+        },
+        // tmux requests SGR mouse reporting when its mouse option is enabled.
+        // Direct native input bypasses xterm's disabled browser keyboard input.
+        btApplicationWheel(ticks, x, y) {
+            if (!btApplicationScrollEnabled() || term.hasSelection()) return;
+            const screen = terminalElement.querySelector('.xterm-screen');
+            const cell = getCellSize();
+            if (!screen || !cell.width || !cell.height || !Number.isFinite(ticks)) return;
+            const rect = screen.getBoundingClientRect();
+            const col = Math.max(1, Math.min(term.cols, Math.floor((x - rect.left) / cell.width) + 1));
+            const row = Math.max(1, Math.min(term.rows, Math.floor((y - rect.top) / cell.height) + 1));
+            const button = ticks > 0 ? 64 : 65;
+            const sequence = `\x1b[<${button};${col};${row}M`;
+            native.sendInput(sequence.repeat(Math.min(8, Math.abs(Math.trunc(ticks)))));
         },
         getSize() {
             return [term.cols, term.rows];
@@ -203,6 +212,15 @@
         setFocused(focused) {
             terminalElement.classList.toggle('terminal-focused', !!focused);
             setXtermAppActive(!!focused);
+            btLastApplicationScroll = undefined;
+            scheduleScrollSync();
+        },
+        btRefreshNativeState() {
+            lastNativeScrollHeight = undefined;
+            lastNativeScrollTop = undefined;
+            btLastApplicationScroll = undefined;
+            nativeScrollRequest = null;
+            syncScroll();
         },
         scrollToBottom() {
             term.scrollToBottom();
@@ -256,6 +274,7 @@
     setXtermAppActive(true);
     fitTerminal();
     native.load();
+    native.resize();
     native.syncFocus();
 
     function disableWebTextInput() {
@@ -282,15 +301,33 @@
     }
 
     function installFocusBridge() {
+        // UIKit owns the pan and momentum. A short stationary tap alone focuses
+        // the keyboard; a swipe or long press must not reset selection or focus.
+        let touch = null;
         terminalElement.addEventListener('touchstart', (event) => {
-            if (!term.hasSelection())
-                event.preventDefault();
-        }, {capture: true});
-        terminalElement.addEventListener('touchend', (event) => {
-            if (term.hasSelection())
-                term.clearSelection();
-            event.preventDefault();
+            const point = event.touches[0];
+            touch = event.touches.length === 1 && point ? {
+                x: point.clientX, y: point.clientY, time: performance.now(), moved: false,
+            } : null;
             event.stopImmediatePropagation();
+        }, {capture: true, passive: true});
+        terminalElement.addEventListener('touchmove', (event) => {
+            const point = event.touches[0];
+            if (touch && point && (event.touches.length !== 1 ||
+                Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > 8))
+                touch.moved = true;
+            event.stopImmediatePropagation();
+        }, {capture: true, passive: true});
+        terminalElement.addEventListener('touchcancel', () => { touch = null; }, {capture: true});
+        terminalElement.addEventListener('touchend', (event) => {
+            const point = event.changedTouches[0];
+            const tap = touch && point && !touch.moved && performance.now() - touch.time < 350 &&
+                Math.hypot(point.clientX - touch.x, point.clientY - touch.y) <= 8;
+            touch = null;
+            event.stopImmediatePropagation();
+            if (!tap) return;
+            if (term.hasSelection()) term.clearSelection();
+            if (event.cancelable) event.preventDefault();
             native.focus();
         }, {capture: true});
         terminalElement.addEventListener('mousedown', (event) => {
@@ -364,7 +401,18 @@
         });
     }
 
+    let btLastApplicationScroll;
+    function btApplicationScrollEnabled() {
+        const mode = term.modes?.mouseTrackingMode;
+        return term.buffer.active.type === 'alternate' && !!mode && mode !== 'none';
+    }
+
     function syncScroll() {
+        const btEnabled = btApplicationScrollEnabled();
+        if (btEnabled !== btLastApplicationScroll) {
+            native.btApplicationScroll(btEnabled);
+            btLastApplicationScroll = btEnabled;
+        }
         const cellHeight = getCellSize().height;
         if (!cellHeight)
             return;

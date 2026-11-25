@@ -14,10 +14,158 @@
 #import "AboutViewController.h"
 #import "NSObject+SaneKVO.h"
 #import "LinuxInterop.h"
+#import <objc/runtime.h>
+
+static char BTSessionPIDKey;
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "kernel/calls.h"
 #include "fs/devices.h"
+
+@interface TerminalView (BetterTerminalDeveloperActions)
+- (void)copyAllTerminalOutput:(id)sender;
+@end
+
+
+// BetterTerminal local preview v0.2
+#import <WebKit/WebKit.h>
+
+@interface BTLocalPreviewController : UIViewController <WKNavigationDelegate, UITextFieldDelegate>
+@property (nonatomic, strong) WKWebView *preview;
+@property (nonatomic, strong) UITextField *address;
+@property (nonatomic, strong) UILabel *statusLabel;
+@end
+
+@implementation BTLocalPreviewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Local Preview";
+    self.view.backgroundColor = UIColor.systemBackgroundColor;
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(btDone:)];
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh target:self action:@selector(btReload:)];
+
+    UITextField *field = [UITextField new];
+    field.borderStyle = UITextBorderStyleRoundedRect;
+    field.keyboardType = UIKeyboardTypeURL;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    field.spellCheckingType = UITextSpellCheckingTypeNo;
+    field.returnKeyType = UIReturnKeyGo;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.text = @"http://127.0.0.1:8080";
+    field.accessibilityLabel = @"Local website address";
+    field.delegate = self;
+    self.address = field;
+    [field setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIButton *go = [UIButton buttonWithType:UIButtonTypeSystem];
+    [go setTitle:@"Go" forState:UIControlStateNormal];
+    [go addTarget:self action:@selector(btGo:) forControlEvents:UIControlEventTouchUpInside];
+    [go.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[field, go]];
+    row.spacing = 8;
+    row.alignment = UIStackViewAlignmentFill;
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:row];
+
+    UILabel *status = [UILabel new];
+    status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    status.textColor = UIColor.secondaryLabelColor;
+    status.numberOfLines = 2;
+    status.text = @"Localhost only";
+    status.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:status];
+    self.statusLabel = status;
+
+    // Isolated from the terminal WKWebView and its privileged message handlers.
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    config.websiteDataStore = WKWebsiteDataStore.nonPersistentDataStore;
+    WKWebView *web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
+    web.navigationDelegate = self;
+    web.allowsBackForwardNavigationGestures = YES;
+    web.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:web];
+    self.preview = web;
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [row.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+        [row.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+        [row.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:44],
+        [status.topAnchor constraintEqualToAnchor:row.bottomAnchor constant:5],
+        [status.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [status.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [web.topAnchor constraintEqualToAnchor:status.bottomAnchor constant:6],
+        [web.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [web.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor]
+    ]];
+    if (@available(iOS 15.0, *)) {
+        [web.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor].active = YES;
+    } else {
+        [web.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor].active = YES;
+    }
+    [self btGo:nil];
+}
+
+- (BOOL)btAllowsURL:(NSURL *)url {
+    if (!url) return NO;
+    NSString *scheme = url.scheme.lowercaseString;
+    NSString *host = url.host.lowercaseString;
+    BOOL isHTTP = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+    BOOL isLoopback = [host isEqualToString:@"localhost"] || [host isEqualToString:@"127.0.0.1"] ||
+        [host isEqualToString:@"::1"] || [host isEqualToString:@"[::1]"];
+    return isHTTP && isLoopback && !url.user && !url.password &&
+        (!url.port || (url.port.integerValue > 0 && url.port.integerValue <= 65535));
+}
+
+- (void)btGo:(id)sender {
+    NSString *value = [self.address.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (![value containsString:@"://"]) value = [@"http://" stringByAppendingString:value];
+    NSURL *url = [NSURL URLWithString:value];
+    if (![self btAllowsURL:url]) {
+        self.statusLabel.text = @"Enter a localhost or loopback HTTP(S) address.";
+        return;
+    }
+    [self.address resignFirstResponder];
+    self.address.text = url.absoluteString;
+    self.statusLabel.text = @"Loading local server…";
+    [self.preview loadRequest:[NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:15]];
+}
+- (void)btReload:(id)sender { [self btGo:sender]; }
+- (void)btDone:(id)sender {
+    [self.preview stopLoading];
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+- (BOOL)textFieldShouldReturn:(UITextField *)textField { [self btGo:textField]; return YES; }
+- (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)action
+    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+    if (![self btAllowsURL:action.request.URL]) {
+        self.statusLabel.text = @"Navigation blocked: local preview only.";
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+    if (action.targetFrame == nil) {
+        decisionHandler(WKNavigationActionPolicyCancel);
+        [webView loadRequest:action.request];
+        return;
+    }
+    decisionHandler(WKNavigationActionPolicyAllow);
+}
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    self.address.text = webView.URL.absoluteString;
+    self.statusLabel.text = @"Local preview · swipe to scroll";
+}
+- (void)btReportError:(NSError *)error {
+    if ([error.domain isEqualToString:NSURLErrorDomain] && error.code == NSURLErrorCancelled) return;
+    self.statusLabel.text = error.localizedDescription;
+}
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self btReportError:error]; }
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error { [self btReportError:error]; }
+@end
 
 @interface TerminalViewController () <UIGestureRecognizerDelegate>
 
@@ -43,6 +191,17 @@
 @property (weak, nonatomic) IBOutlet UIButton *infoButton;
 @property (weak, nonatomic) IBOutlet UIButton *pasteButton;
 @property (weak, nonatomic) IBOutlet UIButton *hideKeyboardButton;
+
+// BetterTerminal native tabs v0.2
+@property (nonatomic) NSMutableArray<Terminal *> *btTabs;
+@property (nonatomic) NSMutableDictionary<NSUUID *, NSNumber *> *btPids;
+@property (nonatomic) NSMutableDictionary<NSUUID *, NSString *> *btNames;
+@property (nonatomic) NSUInteger btNextNumber;
+@property (nonatomic) UIStackView *btTabStack;
+@property (nonatomic) UIScrollView *btTabScroll;
+@property (nonatomic) UIButton *btAddButton;
+@property (nonatomic) UIScrollView *btDeveloperKeys;
+@property (nonatomic) UIStackView *btDeveloperKeyStack;
 
 @property int sessionPid;
 @property (nonatomic) Terminal *sessionTerminal;
@@ -74,6 +233,8 @@
     }
 #endif
 
+    [self btInstallTabs];
+    [self btInstallDeveloperKeys];
     self.terminal = self.terminal;
     [self.termView becomeFirstResponder];
 
@@ -145,23 +306,298 @@
 }
 
 - (void)startNewSession {
+    [self btEnsureTabs];
+    Terminal *previous = self.sessionTerminal;
+    Terminal *previousDisplay = self.terminal;
+    int previousPid = self.sessionPid;
     int err = [self startSession];
-    if (err < 0) {
+    if (err < 0 || !self.sessionTerminal) {
+        Terminal *failed = self.sessionTerminal;
+        self.sessionTerminal = previous;
+        self.sessionPid = previousPid;
+        if (self.terminal != previousDisplay) self.terminal = previousDisplay;
+        if (failed && failed != previous) [failed destroy];
         NSLog(@"could not start session: %d", err);
         [self showMessage:@"could not start session"
                  subtitle:[NSString stringWithFormat:@"error code %d", err]];
+        return;
     }
+    [self btRememberTerminal:self.sessionTerminal pid:self.sessionPid];
+    [self btActivateTerminal:self.sessionTerminal];
 }
 
 - (void)reconnectSessionFromTerminalUUID:(NSUUID *)uuid {
-    self.sessionTerminal = [Terminal terminalWithUUID:uuid];
-    if (self.sessionTerminal == nil)
+    Terminal *terminal = uuid ? [Terminal terminalWithUUID:uuid] : nil;
+    if (!terminal) {
         [self startNewSession];
+        return;
+    }
+    NSNumber *pid = objc_getAssociatedObject(terminal, &BTSessionPIDKey);
+    [self btRememberTerminal:terminal pid:pid.intValue];
+    [self btActivateTerminal:terminal];
 }
 
 - (NSUUID *)sessionTerminalUUID {
-    return self.terminal.uuid;
+    return self.sessionTerminal.uuid;
 }
+
+#pragma mark BetterTerminal native tabs
+
+
+- (void)btOpenPreview:(id)sender {
+    if (self.presentedViewController) return;
+    [self.termView resignFirstResponder];
+    BTLocalPreviewController *preview = [BTLocalPreviewController new];
+    UINavigationController *navigation = [[UINavigationController alloc] initWithRootViewController:preview];
+    navigation.modalPresentationStyle = UIModalPresentationFullScreen;
+    [self presentViewController:navigation animated:YES completion:nil];
+}
+
+
+
+- (void)btEnsureTabs {
+    if (self.btTabs != nil) return;
+    self.btTabs = [NSMutableArray array];
+    self.btPids = [NSMutableDictionary dictionary];
+    self.btNames = [NSMutableDictionary dictionary];
+    self.btNextNumber = 1;
+}
+
+- (void)btRememberTerminal:(Terminal *)terminal pid:(int)pid {
+    if (!terminal) return;
+    [self btEnsureTabs];
+    if (![self.btTabs containsObject:terminal]) {
+        [self.btTabs addObject:terminal];
+        self.btNames[terminal.uuid] = [NSString stringWithFormat:@"Terminal %lu", (unsigned long)self.btNextNumber++];
+    }
+    if (pid > 0) {
+        self.btPids[terminal.uuid] = @(pid);
+        objc_setAssociatedObject(terminal, &BTSessionPIDKey, @(pid), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+- (void)btInstallTabs {
+    if (self.btTabStack) return;
+    [self btEnsureTabs];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *oldTop = nil;
+    for (NSLayoutConstraint *constraint in self.view.constraints) {
+        if (constraint.firstItem == self.termView && constraint.firstAttribute == NSLayoutAttributeTop &&
+            constraint.secondItem == safe && constraint.secondAttribute == NSLayoutAttributeTop) {
+            oldTop = constraint;
+            break;
+        }
+    }
+    if (!oldTop) {
+        NSLog(@"BetterTerminal: terminal top constraint missing; tabs not installed");
+        return;
+    }
+    UIColor *background = [UIColor colorWithRed:0.043 green:0.067 blue:0.067 alpha:1];
+    UIColor *accent = [UIColor colorWithRed:0 green:0.90 blue:0.60 alpha:1];
+    UIView *strip = [UIView new];
+    strip.translatesAutoresizingMaskIntoConstraints = NO;
+    strip.backgroundColor = background;
+    [self.view addSubview:strip];
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.alwaysBounceVertical = NO;
+    scroll.directionalLockEnabled = YES;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [strip addSubview:scroll];
+    self.btTabScroll = scroll;
+
+    UIStackView *stack = [UIStackView new];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 6;
+    [scroll addSubview:stack];
+    self.btTabStack = stack;
+
+    UIButton *add = [UIButton buttonWithType:UIButtonTypeSystem];
+    add.translatesAutoresizingMaskIntoConstraints = NO;
+    [add setTitle:@"+" forState:UIControlStateNormal];
+    add.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightMedium];
+    add.tintColor = accent;
+    add.accessibilityLabel = @"New terminal tab";
+    [add addTarget:self action:@selector(btAddTab:) forControlEvents:UIControlEventTouchUpInside];
+    [strip addSubview:add];
+    self.btAddButton = add;
+
+    UIButton *browser = [UIButton buttonWithType:UIButtonTypeSystem];
+    browser.translatesAutoresizingMaskIntoConstraints = NO;
+    [browser setImage:[UIImage systemImageNamed:@"globe"] forState:UIControlStateNormal];
+    browser.tintColor = accent;
+    browser.accessibilityLabel = @"Open local website preview";
+    [browser addTarget:self action:@selector(btOpenPreview:) forControlEvents:UIControlEventTouchUpInside];
+    [strip addSubview:browser];
+
+
+    oldTop.active = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [strip.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [strip.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [strip.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [strip.heightAnchor constraintEqualToConstant:46],
+        [self.termView.topAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [add.trailingAnchor constraintEqualToAnchor:strip.trailingAnchor constant:-4],
+        [add.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [add.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [add.widthAnchor constraintEqualToConstant:44],
+        [scroll.leadingAnchor constraintEqualToAnchor:strip.leadingAnchor constant:6],
+        [browser.trailingAnchor constraintEqualToAnchor:add.leadingAnchor],
+        [browser.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [browser.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [browser.widthAnchor constraintEqualToConstant:44],
+        [scroll.trailingAnchor constraintEqualToAnchor:browser.leadingAnchor constant:-4],
+        [scroll.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [stack.heightAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.heightAnchor]
+    ]];
+    [self btRefreshTabs];
+}
+
+- (void)btRefreshTabs {
+    if (!self.btTabStack) return;
+    for (UIView *view in [self.btTabStack.arrangedSubviews copy]) {
+        [self.btTabStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+    UIColor *accent = [UIColor colorWithRed:0 green:0.90 blue:0.60 alpha:1];
+    UIButton *selectedButton = nil;
+    for (NSUInteger i = 0; i < self.btTabs.count; i++) {
+        Terminal *terminal = self.btTabs[i];
+        BOOL selected = self.terminal == terminal;
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.tag = (NSInteger)i;
+        NSString *name = self.btNames[terminal.uuid] ?: @"Terminal";
+        [button setTitle:name forState:UIControlStateNormal];
+        [button setTitleColor:selected ? accent : [UIColor colorWithWhite:0.78 alpha:1] forState:UIControlStateNormal];
+        button.titleLabel.font = [UIFont systemFontOfSize:13 weight:selected ? UIFontWeightSemibold : UIFontWeightRegular];
+        button.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        button.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12);
+        button.backgroundColor = selected ? [UIColor colorWithRed:0.08 green:0.23 blue:0.18 alpha:1] : [UIColor colorWithWhite:0.13 alpha:1];
+        button.layer.cornerRadius = 8;
+        button.accessibilityLabel = name;
+        button.accessibilityHint = @"Double tap to switch. Touch and hold for tab options.";
+        if (selected) {
+            button.accessibilityTraits |= UIAccessibilityTraitSelected;
+            selectedButton = button;
+        }
+        [button addTarget:self action:@selector(btSelectTab:) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(btTabOptions:)];
+        [button addGestureRecognizer:hold];
+        [self.btTabStack addArrangedSubview:button];
+        [button.heightAnchor constraintEqualToConstant:34].active = YES;
+        [button.widthAnchor constraintLessThanOrEqualToConstant:180].active = YES;
+    }
+    self.btAddButton.enabled = self.btTabs.count < 8;
+    [self.view layoutIfNeeded];
+    if (selectedButton) {
+        CGRect frame = [selectedButton convertRect:selectedButton.bounds toView:self.btTabScroll];
+        [self.btTabScroll scrollRectToVisible:CGRectInset(frame, -4, 0) animated:NO];
+    }
+}
+
+- (void)btActivateTerminal:(Terminal *)terminal {
+    if (!terminal || ![self.btTabs containsObject:terminal]) return;
+    self.sessionTerminal = terminal;
+    self.sessionPid = [self.btPids[terminal.uuid] intValue];
+    if (self.terminal != terminal) self.terminal = terminal;
+    [self btRefreshTabs];
+}
+
+- (void)btAddTab:(id)sender {
+    [self btEnsureTabs];
+    if (self.btTabs.count >= 8) {
+        [self showMessage:@"Tab limit reached" subtitle:@"Close a tab before creating another."];
+        return;
+    }
+    [self startNewSession];
+}
+
+- (void)btSelectTab:(UIButton *)sender {
+    if (sender.tag < 0 || (NSUInteger)sender.tag >= self.btTabs.count) return;
+    [self btActivateTerminal:self.btTabs[(NSUInteger)sender.tag]];
+}
+
+- (void)btRenameTerminal:(Terminal *)terminal {
+    if (![self.btTabs containsObject:terminal]) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename tab" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.text = self.btNames[terminal.uuid];
+        field.placeholder = @"Tab name";
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        typeof(self) self = weakSelf;
+        NSString *name = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (self && name.length && [self.btTabs containsObject:terminal]) {
+            self.btNames[terminal.uuid] = name;
+            [self btRefreshTabs];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)btRemoveTerminal:(Terminal *)terminal hangup:(BOOL)hangup {
+    NSUInteger index = [self.btTabs indexOfObjectIdenticalTo:terminal];
+    if (index == NSNotFound) return;
+    BOOL wasActive = self.sessionTerminal == terminal;
+    [self.btTabs removeObjectAtIndex:index];
+    [self.btNames removeObjectForKey:terminal.uuid];
+    [self.btPids removeObjectForKey:terminal.uuid];
+    if (wasActive) {
+        self.sessionTerminal = nil;
+        self.sessionPid = 0;
+        if (self.btTabs.count) {
+            [self btActivateTerminal:self.btTabs[MIN(index, self.btTabs.count - 1)]];
+        }
+    }
+    if (hangup) [terminal destroy];
+    [self btRefreshTabs];
+}
+
+- (void)btTabOptions:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    NSInteger index = gesture.view.tag;
+    if (index < 0 || (NSUInteger)index >= self.btTabs.count) return;
+    Terminal *terminal = self.btTabs[(NSUInteger)index];
+    UIAlertController *menu = [UIAlertController alertControllerWithTitle:self.btNames[terminal.uuid] message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [menu addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf btRenameTerminal:terminal];
+    }]];
+    if (self.btTabs.count > 1) {
+        [menu addAction:[UIAlertAction actionWithTitle:@"Close tab…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+            typeof(self) self = weakSelf;
+            if (!self) return;
+            UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Close terminal?" message:@"Running jobs in this tab may be terminated." preferredStyle:UIAlertControllerStyleAlert];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                typeof(self) self = weakSelf;
+                if (self.btTabs.count > 1) [self btRemoveTerminal:terminal hangup:YES];
+            }]];
+            [self presentViewController:confirm animated:YES completion:nil];
+        }]];
+    }
+    [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    if (menu.popoverPresentationController) {
+        menu.popoverPresentationController.sourceView = gesture.view;
+        menu.popoverPresentationController.sourceRect = gesture.view.bounds;
+    }
+    [self presentViewController:menu animated:YES completion:nil];
+}
+
+
 
 - (int)startSession {
     NSArray<NSString *> *command = UserPreferences.shared.launchCommand;
@@ -244,15 +680,19 @@
 #if !ISH_LINUX
 - (void)processExited:(NSNotification *)notif {
     int pid = [notif.userInfo[@"pid"] intValue];
-    if (pid != self.sessionPid)
-        return;
-
+    Terminal *exited = nil;
+    for (Terminal *terminal in self.btTabs) {
+        if (pid > 0 && [self.btPids[terminal.uuid] intValue] == pid) {
+            exited = terminal;
+            break;
+        }
+    }
+    if (!exited) return;
     int code = [notif.userInfo[@"code"] intValue];
     NSLog(@"terminal session pid %d exited with code %d", pid, code);
-    [self.sessionTerminal destroy];
-    self.sessionTerminal = nil;
-    current = NULL; // it's been freed
-    [self startNewSession];
+    [self btRemoveTerminal:exited hangup:YES];
+    current = NULL; // original session-exit cleanup
+    if (self.btTabs.count == 0) [self startNewSession];
 }
 #endif
 
@@ -296,6 +736,7 @@
         for (UIControl *control in self.barControls) {
             control.tintColor = tintColor;
         }
+        [self btStyleDeveloperKeys];
     }];
     UIView *oldBarView = self.termView.inputAccessoryView;
     if (UserPreferences.shared.hideExtraKeysWithExternalKeyboard && self.hasExternalKeyboard) {
@@ -394,6 +835,119 @@
     }
 }
 
+#pragma mark BetterTerminal developer keys
+
+- (void)btInstallDeveloperKeys {
+    if (self.btDeveloperKeys || !self.barView || !self.bar) return;
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.directionalLockEnabled = YES;
+    scroll.alwaysBounceVertical = NO;
+    scroll.delaysContentTouches = YES;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [self.barView addSubview:scroll];
+    self.btDeveloperKeys = scroll;
+
+    UIStackView *keys = [UIStackView new];
+    keys.translatesAutoresizingMaskIntoConstraints = NO;
+    keys.axis = UILayoutConstraintAxisHorizontal;
+    keys.spacing = 6;
+    keys.alignment = UIStackViewAlignmentFill;
+    [scroll addSubview:keys];
+    self.btDeveloperKeyStack = keys;
+
+    NSArray<NSString *> *titles = @[@"←", @"↑", @"↓", @"→", @"Home", @"End", @"PgUp", @"PgDn",
+                                   @"Ctrl+C", @"Ctrl+L", @"Ctrl+A", @"Ctrl+E", @"Ctrl+R", @"Ctrl+D",
+                                   @"Copy All", @"F1", @"F2", @"F3", @"F4", @"F5", @"F6", @"F7", @"F8", @"F9", @"F10", @"F11", @"F12"];
+    NSArray<NSString *> *labels = @[@"Left arrow", @"Up arrow", @"Down arrow", @"Right arrow",
+                                   @"Home", @"End", @"Page up", @"Page down",
+                                   @"Interrupt, Control C", @"Clear screen, Control L", @"Beginning of line, Control A",
+                                   @"End of line, Control E", @"Reverse history search, Control R", @"End of input, Control D",
+                                   @"Copy all terminal output", @"F1", @"F2", @"F3", @"F4", @"F5", @"F6", @"F7", @"F8", @"F9", @"F10", @"F11", @"F12"];
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.tag = (NSInteger)i;
+        button.translatesAutoresizingMaskIntoConstraints = NO;
+        button.titleLabel.font = [UIFont fontWithName:@"Menlo" size:12] ?: [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        button.contentEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
+        button.layer.cornerRadius = 8;
+        [button setTitle:titles[i] forState:UIControlStateNormal];
+        button.accessibilityLabel = labels[i];
+        [button.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+        [button addTarget:self action:@selector(btDeveloperKeyPressed:) forControlEvents:UIControlEventTouchUpInside];
+        [keys addArrangedSubview:button];
+    }
+
+    UILayoutGuide *safe = self.barView.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [scroll.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:6],
+        [scroll.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-6],
+        [scroll.bottomAnchor constraintEqualToAnchor:self.bar.topAnchor constant:-6],
+        [scroll.heightAnchor constraintEqualToConstant:44],
+        [keys.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [keys.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [keys.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [keys.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [keys.heightAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.heightAnchor]
+    ]];
+    self.barTop.constant = self.barBottom.constant + 50;
+    [self btStyleDeveloperKeys];
+    [self.barView invalidateIntrinsicContentSize];
+    [self.barView setNeedsLayout];
+}
+
+- (void)btStyleDeveloperKeys {
+    UIColor *foreground = [[UIColor alloc] ish_initWithHexString:UserPreferences.shared.palette.foregroundColor];
+    UIColor *background = [[UIColor alloc] ish_initWithHexString:UserPreferences.shared.palette.backgroundColor];
+    foreground = foreground ?: UIColor.whiteColor;
+    background = background ?: UIColor.blackColor;
+    self.btDeveloperKeys.backgroundColor = background;
+    for (UIButton *button in self.btDeveloperKeyStack.arrangedSubviews) {
+        [button setTitleColor:foreground forState:UIControlStateNormal];
+        button.tintColor = foreground;
+        button.backgroundColor = [foreground colorWithAlphaComponent:0.12];
+    }
+}
+
+- (void)btDeveloperKeyPressed:(UIButton *)sender {
+    Terminal *terminal = self.terminal;
+    if (!terminal || !terminal.loaded) return;
+    if (sender.tag == 14) {
+        [self.termView copyAllTerminalOutput:nil];
+        return;
+    }
+    // Explicit special keys must not consume or be transformed by the Ctrl latch.
+    self.controlKey.selected = NO;
+    NSString *key = nil;
+    switch (sender.tag) {
+        case 0: key = [terminal arrow:'D']; break;
+        case 1: key = [terminal arrow:'A']; break;
+        case 2: key = [terminal arrow:'B']; break;
+        case 3: key = [terminal arrow:'C']; break;
+        case 4: key = [terminal arrow:'H']; break;
+        case 5: key = [terminal arrow:'F']; break;
+        case 6: key = @"\x1b[5~"; break;
+        case 7: key = @"\x1b[6~"; break;
+        case 8: key = @"\x03"; break;
+        case 9: key = @"\x0c"; break;
+        case 10: key = @"\x01"; break;
+        case 11: key = @"\x05"; break;
+        case 12: key = @"\x12"; break;
+        case 13: key = @"\x04"; break;
+        default: {
+            NSArray<NSString *> *functionKeys = @[@"\x1bOP", @"\x1bOQ", @"\x1bOR", @"\x1bOS",
+                @"\x1b[15~", @"\x1b[17~", @"\x1b[18~", @"\x1b[19~", @"\x1b[20~", @"\x1b[21~", @"\x1b[23~", @"\x1b[24~"];
+            NSInteger index = sender.tag - 15;
+            if (index >= 0 && index < (NSInteger)functionKeys.count) key = functionKeys[(NSUInteger)index];
+            break;
+        }
+    }
+    if (key) [terminal sendInput:[key dataUsingEncoding:NSUTF8StringEncoding]];
+}
+
 #pragma mark Bar
 
 - (IBAction)showAbout:(id)sender {
@@ -432,7 +986,8 @@
 
 - (void)setBarHorizontalPadding:(CGFloat)horizontal verticalPadding:(CGFloat)vertical buttonWidth:(CGFloat)buttonWidth {
     self.barLeading.constant = self.barTrailing.constant = horizontal;
-    self.barTop.constant = self.barBottom.constant = vertical;
+    self.barBottom.constant = vertical;
+    self.barTop.constant = vertical + (self.btDeveloperKeys ? 50 : 0);
     self.barButtonWidth.constant = buttonWidth;
 }
 
@@ -466,6 +1021,7 @@
         self.terminal = self.sessionTerminal;
     else
         self.terminal = [Terminal terminalWithType:TTY_CONSOLE_MAJOR number:i];
+    [self btRefreshTabs];
 }
 
 - (void)increaseFontSize:(UIKeyCommand *)command {
@@ -513,7 +1069,10 @@
                                     action:@selector(showAbout:)
                       discoverabilityTitle:@"Settings"]];
     }
-    return commands;
+    // Keep existing shortcuts; Command-T opens a native shell tab.
+    return [commands arrayByAddingObject:[UIKeyCommand keyCommandWithInput:@"t"
+        modifierFlags:UIKeyModifierCommand action:@selector(btAddTab:)
+        discoverabilityTitle:@"New Terminal Tab"]];
 }
 
 - (void)setTerminal:(Terminal *)terminal {

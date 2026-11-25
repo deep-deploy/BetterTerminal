@@ -47,6 +47,13 @@
     return self;
 }
 
+// Let the parent scroll view take over vertical drags across the web content.
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    if (self.contentView && (view == self.contentView || [view isDescendantOfView:self.contentView]))
+        return YES;
+    return [super touchesShouldCancelInContentView:view];
+}
+
 - (void)setContentView:(UIView *)contentView {
     _contentView = contentView;
     self.contentViewOrigin = contentView.frame.origin;
