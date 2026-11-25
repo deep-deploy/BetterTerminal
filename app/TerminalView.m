@@ -145,6 +145,11 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 
     self.btApplicationPan.enabled = NO;
     self.btApplicationPanRemainder = 0;
+    // BetterTerminal tab scroll reset
+    self.updatingTerminalScroll = YES;
+    self.scrollbarView.contentSize = self.scrollbarView.bounds.size;
+    [self.scrollbarView setContentOffset:CGPointZero animated:NO];
+    self.updatingTerminalScroll = NO;
     _terminal = terminal;
     self.selectedText = nil;
     if (_terminal == nil)
@@ -158,6 +163,10 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     UIView *superview = self.terminal.webView.superview;
     if (superview != nil) {
         NSAssert(superview == self.scrollbarView, @"installing terminal that is already installed elsewhere");
+        if (_terminal.loaded) {
+            [self.terminal.webView evaluateJavaScript:@"exports.btRefreshNativeState?.()" completionHandler:nil];
+            [self syncTerminalRenderFocus];
+        }
         return;
     }
 
@@ -179,6 +188,10 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 
     self.scrollbarView.contentView = webView;
     [self.scrollbarView addSubview:webView];
+    if (_terminal.loaded) {
+        [webView evaluateJavaScript:@"exports.btRefreshNativeState?.()" completionHandler:nil];
+        [self syncTerminalRenderFocus];
+    }
 }
 
 - (void)uninstallTerminalView {
@@ -189,6 +202,7 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
         return;
     }
 
+    [_terminal.webView evaluateJavaScript:@"exports.setFocused(false)" completionHandler:nil];
     [_terminal.webView removeFromSuperview];
     self.scrollbarView.contentView = nil;
     for (int i = 0; i < sizeof(HANDLERS)/sizeof(HANDLERS[0]); i++) {
@@ -317,6 +331,7 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (!self.terminal || message.webView != self.terminal.webView) return;
     if ([message.name isEqualToString:@"syncFocus"]) {
         [self syncTerminalRenderFocus];
     } else if ([message.name isEqualToString:@"focus"]) {

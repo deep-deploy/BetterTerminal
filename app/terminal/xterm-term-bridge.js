@@ -215,6 +215,13 @@
             btLastApplicationScroll = undefined;
             scheduleScrollSync();
         },
+        btRefreshNativeState() {
+            lastNativeScrollHeight = undefined;
+            lastNativeScrollTop = undefined;
+            btLastApplicationScroll = undefined;
+            nativeScrollRequest = null;
+            syncScroll();
+        },
         scrollToBottom() {
             term.scrollToBottom();
             scheduleScrollSync();

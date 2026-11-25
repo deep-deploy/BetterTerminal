@@ -14,6 +14,9 @@
 #import "AboutViewController.h"
 #import "NSObject+SaneKVO.h"
 #import "LinuxInterop.h"
+#import <objc/runtime.h>
+
+static char BTSessionPIDKey;
 #include "kernel/init.h"
 #include "kernel/task.h"
 #include "kernel/calls.h"
@@ -43,6 +46,15 @@
 @property (weak, nonatomic) IBOutlet UIButton *infoButton;
 @property (weak, nonatomic) IBOutlet UIButton *pasteButton;
 @property (weak, nonatomic) IBOutlet UIButton *hideKeyboardButton;
+
+// BetterTerminal native tabs v0.2
+@property (nonatomic) NSMutableArray<Terminal *> *btTabs;
+@property (nonatomic) NSMutableDictionary<NSUUID *, NSNumber *> *btPids;
+@property (nonatomic) NSMutableDictionary<NSUUID *, NSString *> *btNames;
+@property (nonatomic) NSUInteger btNextNumber;
+@property (nonatomic) UIStackView *btTabStack;
+@property (nonatomic) UIScrollView *btTabScroll;
+@property (nonatomic) UIButton *btAddButton;
 
 @property int sessionPid;
 @property (nonatomic) Terminal *sessionTerminal;
@@ -74,6 +86,7 @@
     }
 #endif
 
+    [self btInstallTabs];
     self.terminal = self.terminal;
     [self.termView becomeFirstResponder];
 
@@ -145,23 +158,273 @@
 }
 
 - (void)startNewSession {
+    [self btEnsureTabs];
+    Terminal *previous = self.sessionTerminal;
+    Terminal *previousDisplay = self.terminal;
+    int previousPid = self.sessionPid;
     int err = [self startSession];
-    if (err < 0) {
+    if (err < 0 || !self.sessionTerminal) {
+        Terminal *failed = self.sessionTerminal;
+        self.sessionTerminal = previous;
+        self.sessionPid = previousPid;
+        if (self.terminal != previousDisplay) self.terminal = previousDisplay;
+        if (failed && failed != previous) [failed destroy];
         NSLog(@"could not start session: %d", err);
         [self showMessage:@"could not start session"
                  subtitle:[NSString stringWithFormat:@"error code %d", err]];
+        return;
     }
+    [self btRememberTerminal:self.sessionTerminal pid:self.sessionPid];
+    [self btActivateTerminal:self.sessionTerminal];
 }
 
 - (void)reconnectSessionFromTerminalUUID:(NSUUID *)uuid {
-    self.sessionTerminal = [Terminal terminalWithUUID:uuid];
-    if (self.sessionTerminal == nil)
+    Terminal *terminal = uuid ? [Terminal terminalWithUUID:uuid] : nil;
+    if (!terminal) {
         [self startNewSession];
+        return;
+    }
+    NSNumber *pid = objc_getAssociatedObject(terminal, &BTSessionPIDKey);
+    [self btRememberTerminal:terminal pid:pid.intValue];
+    [self btActivateTerminal:terminal];
 }
 
 - (NSUUID *)sessionTerminalUUID {
-    return self.terminal.uuid;
+    return self.sessionTerminal.uuid;
 }
+
+#pragma mark BetterTerminal native tabs
+
+- (void)btEnsureTabs {
+    if (self.btTabs != nil) return;
+    self.btTabs = [NSMutableArray array];
+    self.btPids = [NSMutableDictionary dictionary];
+    self.btNames = [NSMutableDictionary dictionary];
+    self.btNextNumber = 1;
+}
+
+- (void)btRememberTerminal:(Terminal *)terminal pid:(int)pid {
+    if (!terminal) return;
+    [self btEnsureTabs];
+    if (![self.btTabs containsObject:terminal]) {
+        [self.btTabs addObject:terminal];
+        self.btNames[terminal.uuid] = [NSString stringWithFormat:@"Terminal %lu", (unsigned long)self.btNextNumber++];
+    }
+    if (pid > 0) {
+        self.btPids[terminal.uuid] = @(pid);
+        objc_setAssociatedObject(terminal, &BTSessionPIDKey, @(pid), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+- (void)btInstallTabs {
+    if (self.btTabStack) return;
+    [self btEnsureTabs];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    NSLayoutConstraint *oldTop = nil;
+    for (NSLayoutConstraint *constraint in self.view.constraints) {
+        if (constraint.firstItem == self.termView && constraint.firstAttribute == NSLayoutAttributeTop &&
+            constraint.secondItem == safe && constraint.secondAttribute == NSLayoutAttributeTop) {
+            oldTop = constraint;
+            break;
+        }
+    }
+    if (!oldTop) {
+        NSLog(@"BetterTerminal: terminal top constraint missing; tabs not installed");
+        return;
+    }
+    UIColor *background = [UIColor colorWithRed:0.043 green:0.067 blue:0.067 alpha:1];
+    UIColor *accent = [UIColor colorWithRed:0 green:0.90 blue:0.60 alpha:1];
+    UIView *strip = [UIView new];
+    strip.translatesAutoresizingMaskIntoConstraints = NO;
+    strip.backgroundColor = background;
+    [self.view addSubview:strip];
+
+    UIScrollView *scroll = [UIScrollView new];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.showsHorizontalScrollIndicator = NO;
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.alwaysBounceVertical = NO;
+    scroll.directionalLockEnabled = YES;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [strip addSubview:scroll];
+    self.btTabScroll = scroll;
+
+    UIStackView *stack = [UIStackView new];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 6;
+    [scroll addSubview:stack];
+    self.btTabStack = stack;
+
+    UIButton *add = [UIButton buttonWithType:UIButtonTypeSystem];
+    add.translatesAutoresizingMaskIntoConstraints = NO;
+    [add setTitle:@"+" forState:UIControlStateNormal];
+    add.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightMedium];
+    add.tintColor = accent;
+    add.accessibilityLabel = @"New terminal tab";
+    [add addTarget:self action:@selector(btAddTab:) forControlEvents:UIControlEventTouchUpInside];
+    [strip addSubview:add];
+    self.btAddButton = add;
+
+    oldTop.active = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [strip.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [strip.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [strip.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [strip.heightAnchor constraintEqualToConstant:46],
+        [self.termView.topAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [add.trailingAnchor constraintEqualToAnchor:strip.trailingAnchor constant:-4],
+        [add.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [add.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [add.widthAnchor constraintEqualToConstant:44],
+        [scroll.leadingAnchor constraintEqualToAnchor:strip.leadingAnchor constant:6],
+        [scroll.trailingAnchor constraintEqualToAnchor:add.leadingAnchor constant:-4],
+        [scroll.topAnchor constraintEqualToAnchor:strip.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:strip.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor],
+        [stack.heightAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.heightAnchor]
+    ]];
+    [self btRefreshTabs];
+}
+
+- (void)btRefreshTabs {
+    if (!self.btTabStack) return;
+    for (UIView *view in [self.btTabStack.arrangedSubviews copy]) {
+        [self.btTabStack removeArrangedSubview:view];
+        [view removeFromSuperview];
+    }
+    UIColor *accent = [UIColor colorWithRed:0 green:0.90 blue:0.60 alpha:1];
+    UIButton *selectedButton = nil;
+    for (NSUInteger i = 0; i < self.btTabs.count; i++) {
+        Terminal *terminal = self.btTabs[i];
+        BOOL selected = self.terminal == terminal;
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+        button.tag = (NSInteger)i;
+        NSString *name = self.btNames[terminal.uuid] ?: @"Terminal";
+        [button setTitle:name forState:UIControlStateNormal];
+        [button setTitleColor:selected ? accent : [UIColor colorWithWhite:0.78 alpha:1] forState:UIControlStateNormal];
+        button.titleLabel.font = [UIFont systemFontOfSize:13 weight:selected ? UIFontWeightSemibold : UIFontWeightRegular];
+        button.titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        button.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12);
+        button.backgroundColor = selected ? [UIColor colorWithRed:0.08 green:0.23 blue:0.18 alpha:1] : [UIColor colorWithWhite:0.13 alpha:1];
+        button.layer.cornerRadius = 8;
+        button.accessibilityLabel = name;
+        button.accessibilityHint = @"Double tap to switch. Touch and hold for tab options.";
+        if (selected) {
+            button.accessibilityTraits |= UIAccessibilityTraitSelected;
+            selectedButton = button;
+        }
+        [button addTarget:self action:@selector(btSelectTab:) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(btTabOptions:)];
+        [button addGestureRecognizer:hold];
+        [self.btTabStack addArrangedSubview:button];
+        [button.heightAnchor constraintEqualToConstant:34].active = YES;
+        [button.widthAnchor constraintLessThanOrEqualToConstant:180].active = YES;
+    }
+    self.btAddButton.enabled = self.btTabs.count < 8;
+    [self.view layoutIfNeeded];
+    if (selectedButton) {
+        CGRect frame = [selectedButton convertRect:selectedButton.bounds toView:self.btTabScroll];
+        [self.btTabScroll scrollRectToVisible:CGRectInset(frame, -4, 0) animated:NO];
+    }
+}
+
+- (void)btActivateTerminal:(Terminal *)terminal {
+    if (!terminal || ![self.btTabs containsObject:terminal]) return;
+    self.sessionTerminal = terminal;
+    self.sessionPid = [self.btPids[terminal.uuid] intValue];
+    if (self.terminal != terminal) self.terminal = terminal;
+    [self btRefreshTabs];
+}
+
+- (void)btAddTab:(id)sender {
+    [self btEnsureTabs];
+    if (self.btTabs.count >= 8) {
+        [self showMessage:@"Tab limit reached" subtitle:@"Close a tab before creating another."];
+        return;
+    }
+    [self startNewSession];
+}
+
+- (void)btSelectTab:(UIButton *)sender {
+    if (sender.tag < 0 || (NSUInteger)sender.tag >= self.btTabs.count) return;
+    [self btActivateTerminal:self.btTabs[(NSUInteger)sender.tag]];
+}
+
+- (void)btRenameTerminal:(Terminal *)terminal {
+    if (![self.btTabs containsObject:terminal]) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Rename tab" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.text = self.btNames[terminal.uuid];
+        field.placeholder = @"Tab name";
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        typeof(self) self = weakSelf;
+        NSString *name = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (self && name.length && [self.btTabs containsObject:terminal]) {
+            self.btNames[terminal.uuid] = name;
+            [self btRefreshTabs];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)btRemoveTerminal:(Terminal *)terminal hangup:(BOOL)hangup {
+    NSUInteger index = [self.btTabs indexOfObjectIdenticalTo:terminal];
+    if (index == NSNotFound) return;
+    BOOL wasActive = self.sessionTerminal == terminal;
+    [self.btTabs removeObjectAtIndex:index];
+    [self.btNames removeObjectForKey:terminal.uuid];
+    [self.btPids removeObjectForKey:terminal.uuid];
+    if (wasActive) {
+        self.sessionTerminal = nil;
+        self.sessionPid = 0;
+        if (self.btTabs.count) {
+            [self btActivateTerminal:self.btTabs[MIN(index, self.btTabs.count - 1)]];
+        }
+    }
+    if (hangup) [terminal destroy];
+    [self btRefreshTabs];
+}
+
+- (void)btTabOptions:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    NSInteger index = gesture.view.tag;
+    if (index < 0 || (NSUInteger)index >= self.btTabs.count) return;
+    Terminal *terminal = self.btTabs[(NSUInteger)index];
+    UIAlertController *menu = [UIAlertController alertControllerWithTitle:self.btNames[terminal.uuid] message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [menu addAction:[UIAlertAction actionWithTitle:@"Rename" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf btRenameTerminal:terminal];
+    }]];
+    if (self.btTabs.count > 1) {
+        [menu addAction:[UIAlertAction actionWithTitle:@"Close tab…" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+            typeof(self) self = weakSelf;
+            if (!self) return;
+            UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Close terminal?" message:@"Running jobs in this tab may be terminated." preferredStyle:UIAlertControllerStyleAlert];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+            [confirm addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+                typeof(self) self = weakSelf;
+                if (self.btTabs.count > 1) [self btRemoveTerminal:terminal hangup:YES];
+            }]];
+            [self presentViewController:confirm animated:YES completion:nil];
+        }]];
+    }
+    [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    if (menu.popoverPresentationController) {
+        menu.popoverPresentationController.sourceView = gesture.view;
+        menu.popoverPresentationController.sourceRect = gesture.view.bounds;
+    }
+    [self presentViewController:menu animated:YES completion:nil];
+}
+
+
 
 - (int)startSession {
     NSArray<NSString *> *command = UserPreferences.shared.launchCommand;
@@ -244,15 +507,19 @@
 #if !ISH_LINUX
 - (void)processExited:(NSNotification *)notif {
     int pid = [notif.userInfo[@"pid"] intValue];
-    if (pid != self.sessionPid)
-        return;
-
+    Terminal *exited = nil;
+    for (Terminal *terminal in self.btTabs) {
+        if (pid > 0 && [self.btPids[terminal.uuid] intValue] == pid) {
+            exited = terminal;
+            break;
+        }
+    }
+    if (!exited) return;
     int code = [notif.userInfo[@"code"] intValue];
     NSLog(@"terminal session pid %d exited with code %d", pid, code);
-    [self.sessionTerminal destroy];
-    self.sessionTerminal = nil;
-    current = NULL; // it's been freed
-    [self startNewSession];
+    [self btRemoveTerminal:exited hangup:YES];
+    current = NULL; // original session-exit cleanup
+    if (self.btTabs.count == 0) [self startNewSession];
 }
 #endif
 
@@ -466,6 +733,7 @@
         self.terminal = self.sessionTerminal;
     else
         self.terminal = [Terminal terminalWithType:TTY_CONSOLE_MAJOR number:i];
+    [self btRefreshTabs];
 }
 
 - (void)increaseFontSize:(UIKeyCommand *)command {
@@ -513,7 +781,10 @@
                                     action:@selector(showAbout:)
                       discoverabilityTitle:@"Settings"]];
     }
-    return commands;
+    // Keep existing shortcuts; Command-T opens a native shell tab.
+    return [commands arrayByAddingObject:[UIKeyCommand keyCommandWithInput:@"t"
+        modifierFlags:UIKeyModifierCommand action:@selector(btAddTab:)
+        discoverabilityTitle:@"New Terminal Tab"]];
 }
 
 - (void)setTerminal:(Terminal *)terminal {
